@@ -1,0 +1,180 @@
+#!/usr/bin/tclsh
+if {$argc < 11} {
+    puts "Usage: rnets <nodes file> <inp> <path> <sqrt(no subnet/node)> <no_conn/link> <time> <connseed> <decr> <port> <noiseIDseed> <noiseseed>"
+        exit
+}
+
+set cont 0
+if {$argc > 11} {set cont [lindex $argv 11]}
+exec touch start
+
+set name [lindex $argv 0]
+set inp [lindex $argv 1] 
+set path [lindex $argv 2]   
+set ns [lindex $argv 3]
+set ncon [lindex $argv 4]
+set tim [lindex $argv 5]
+set seed [lindex $argv 6]
+set decr [lindex $argv 7]
+set port [lindex $argv 8]
+set noiseIDseed [lindex $argv 9]
+set noiseseed [lindex $argv 10]
+set delay 0.3
+set f [open $name r]
+
+gets $f nproc
+
+
+exec cp $name tmp.nodes.tab
+
+
+for {set i 0} {$i<$nproc} {incr i 1} {
+	gets $f node
+	lappend nodelist $node
+}
+close $f
+
+set f [open "$inp.cfg" r]
+gets $f line
+close $f
+set flags [split $line ,]
+set hist [lsearch $flags H]
+set out  [lsearch $flags O]
+set vout [lsearch $flags V]
+set link [lsearch $flags L]
+set stim [lsearch $flags S]
+
+if {($hist==-1) && ($out==-1) && ($vout==-1)} {
+	puts { no output generated }
+	exit
+} 
+set proc [expr sqrt($nproc)]
+
+
+set filelist1 {par syn neu}
+if {$link>-1} {
+	set filelist1 "$filelist1 lin lout"
+}
+#exec rm -f tmp.link 
+if {$stim>-1} {
+	set filelist1 "$filelist1 stim"
+}
+
+set filelist2  "$filelist1 cfg"
+
+
+if {$cont < 1} {
+    puts  "$filelist2"
+puts "mknode $inp tmp $ns $proc $seed $noiseIDseed" 
+exec ./mknode $inp tmp $ns $proc $seed $noiseIDseed >rnet.log
+puts "mklink $inp [expr $proc*$ns] $seed" 
+exec ./mklink $inp [expr $proc*$ns] $seed >>rnet.log
+puts "sublink tmp $ncon $delay $seed" 
+exec ./sublink tmp $ncon $delay $seed >>rnet.log
+puts "link_sort tmp $nproc"
+exec ./link_sort tmp $nproc >>rnet.log
+puts  "crl tmp $nproc" 
+exec ./crl tmp $nproc >>rnet.log
+
+
+
+puts copy
+      
+for {set i 0} {$i<$nproc} {incr i 1} {
+	set node [lindex $nodelist $i]
+	puts $node
+        exec ssh -n $node rm -rf $path
+        exec ssh -n $node mkdir $path
+	exec scp ./tmp.conn.tab "$node:$path/"
+	exec scp ./tmp.nodes.tab "$node:$path/"
+	exec scp ./netclustwacnmdadiff "$node:$path/"
+	foreach ext $filelist2 {
+		exec scp "./tmp.$ext.$i" "$node:$path/"
+	      	}
+	foreach ext $filelist1 {
+		exec scp "./tmp.$ext.$i" "$node:$path/"
+	        exec rm -f "./tmp.$ext.$i"
+		}
+}
+
+#exec rm -f  ./tmp.nodes.tab ./tmp.conn.tab
+
+
+}
+for {set i 0} {$i<$nproc} {incr i 1} {
+        set node [lindex $nodelist $i]
+ 
+    while { ![catch { exec ssh -n $node netstat -n -A inet | grep $port } ]} {
+        puts "...waiting for port in $node"
+        after 1000
+        }
+}
+
+
+puts run
+exec touch run
+for {set i 0} {$i<$nproc-1} {incr i 1} {
+	set node [lindex $nodelist $i]
+	puts $node
+
+#	exec rsh -n $node "$path/netclustwacnmdadiff" tmp $tim $decr & 
+	exec ssh -n $node /bin/nice -n5 "$path/netclustwacnmdadiff" tmp $tim $decr $port $noiseseed $cont &
+}
+set node [lindex $nodelist $i]
+puts $node
+#exec ssh -X $node /bin/nice -n5 "$path/netclustwacnmdadiff" tmp $tim $decr $port $noiseseed >@stdout
+exec ssh -n $node /bin/nice -n5  "$path/netclustwacnmdadiff" tmp $tim  $decr $port $noiseseed $cont >@stdout
+#exec rsh -n $node "$path/netclustwacnmdadiff" tmp $tim  $decr >@stdout  
+exec touch end
+puts "computation time: [expr [file mtime end]-[file mtime run]] sec"
+
+for {set i 0} {$i<$nproc} {incr i 1} {
+        set node [lindex $nodelist $i]
+    while {  ![catch { exec ssh -n $node stat $tmp/done } ]} {
+        puts "...waiting for $node"
+        after 5000
+        }
+}
+
+puts copyout
+set f [open "nclust.log" w]
+for {set i 0} {$i<$nproc} {incr i 1} {
+	set node [lindex $nodelist $i]
+	puts $node
+        exec scp -r "$node:$path/histo_tmp.*" .
+        exec scp -r "$node:$path/Ca_tmp.*" .
+        exec scp -r "$node:$path/Noise_tmp.*" .
+        exec scp -r "$node:$path/Vave_tmp.*" .
+        exec scp -r "$node:$path/VPSP_tmp.*" .
+        exec scp -r "$node:$path/V_tmp.out.*" .
+        exec scp -r "$node:$path/tmp.cfg.*" .
+	exec ssh -n $node cat netclust.log >>nclust.log
+}
+
+#foreach ext $filelist2 {
+#                exec rm -f "$path/tmp.$ext.$i"
+#                }
+
+
+
+if {$hist >-1} {
+puts  "jhist tmp $inp" 
+exec ./jhist tmp $inp >>rnet.log
+}
+puts  "mkhist histo_$inp tmp.node 1"
+exec	./mkhist histo_$inp tmp.node 1 >>rnet.log
+#if {$vout >-1} {
+#exec ./jvout1 tmp $inp $proc >>rnet.log
+#}
+#exec ./linknet $inp tmp $proc >>rnet.log
+puts clean
+#eval exec rm -f [glob "./tmp.*.*"]    
+	if {$hist>-1} {
+#	    eval exec rm -f [ glob "./histo_tmp.*"]
+	}
+	#if {$vout>-1} {
+	#   eval exec rm -f [glob "./V_tmp.out.*"]
+	#}
+
+exec touch end
+puts "total time: [expr [file mtime end]-[file mtime start]] sec"
